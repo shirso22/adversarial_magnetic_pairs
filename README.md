@@ -1,1 +1,3 @@
 # adversarial_magnetic_pairs
+
+This is a computational magnetism notebook that uses gradient descent based optimization with PyTorch on a physics informed objective to generate "adversarial pairs": textures with distinct topological charge, such as skyrmion vs meron, that have near identical stray field signatures under realistic magnetometry setups. Randomized ensembling is used to verify the robustness of the results to different initial textures and small perturbation noise. A multi pole analysis of the optimized texutres is performed to investigate which spatial frequency moments contribute how much to the stray field difference.
