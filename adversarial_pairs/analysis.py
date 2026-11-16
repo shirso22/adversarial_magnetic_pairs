@@ -108,17 +108,18 @@ def kspace_localization(result: PairResult, n_bins: int = 64, power_fraction: fl
     """
     g = result.geometry
     B1, B2 = result.B1, result.B2
+    wx, wy = B1.shape[:2]           # measurement window (may differ from the sample grid)
     F1 = np.fft.fftshift(np.fft.fft2(B1, axes=(0, 1)), axes=(0, 1))
     F2 = np.fft.fftshift(np.fft.fft2(B2, axes=(0, 1)), axes=(0, 1))
     p1 = (np.abs(F1) ** 2).sum(-1)
     p2 = (np.abs(F2) ** 2).sum(-1)
     dd = (np.abs(F1 - F2) ** 2).sum(-1)
 
-    kx = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(g.nx, d=g.dx_nm))
-    ky = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(g.ny, d=g.dy_nm))
+    kx = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(wx, d=g.dx_nm))
+    ky = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(wy, d=g.dy_nm))
     K = np.sqrt(kx[:, None] ** 2 + ky[None, :] ** 2)
 
-    n_bins = min(n_bins, min(g.nx, g.ny) // 2)
+    n_bins = max(1, min(n_bins, min(wx, wy) // 2))
     edges = np.linspace(0.0, K.max() / np.sqrt(2.0), n_bins + 1)
     kc = 0.5 * (edges[:-1] + edges[1:])
     idx = np.clip(np.digitize(K.ravel(), edges) - 1, 0, n_bins - 1)

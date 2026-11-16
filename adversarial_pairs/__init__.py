@@ -15,7 +15,7 @@ from .textures import TEXTURES, make_texture, parse_texture, perturb, register_t
 from .montecarlo import MonteCarloConfig, MonteCarloResult, run_monte_carlo, standoff_sweep
 from . import analysis
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "Geometry", "OptimizerSettings", "PairResult", "MS_MODES", "generate_pair", "optimize_pair",

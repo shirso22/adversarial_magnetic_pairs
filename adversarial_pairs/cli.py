@@ -41,6 +41,11 @@ def _add_geometry(p):
     g.add_argument("--thickness", type=float, default=1.0, help="film thickness in nm (default 1)")
     g.add_argument("--height", type=float, default=20.0, help="standoff height in nm (default 20)")
     g.add_argument("--Ms", type=float, default=1e6, help="initial saturation magnetization, A/m (default 1e6)")
+    g.add_argument("--window", type=_pair_of(float), default=None,
+                   help="measurement-plane size in nm, centered on the sample, e.g. 128 or 128x96 "
+                        "(default: the sample footprint)")
+    g.add_argument("--pad-factor", type=float, default=2.0,
+                   help="FFT domain size / sample size; larger approaches an isolated film (default 2)")
 
 
 def _add_settings(p):
@@ -80,7 +85,8 @@ def _add_mc(p):
 
 
 def _geometry(a):
-    return Geometry(grid=a.grid, sample_size_nm=a.size, thickness_nm=a.thickness, height_nm=a.height, Ms=a.Ms)
+    return Geometry(grid=a.grid, sample_size_nm=a.size, thickness_nm=a.thickness, height_nm=a.height, Ms=a.Ms,
+                    field_window_nm=a.window, fft_pad_factor=a.pad_factor)
 
 
 def _settings(a):

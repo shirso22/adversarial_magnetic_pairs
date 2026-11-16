@@ -85,7 +85,8 @@ class PairResult:
 
     m1, m2 : unit direction fields (nx, ny, 3), numpy
     Ms1, Ms2 : final saturation magnetizations in A/m
-    B1, B2 : stray fields in tesla at the measurement plane
+    B1, B2 : stray fields in tesla on the measurement window,
+             shape ``geometry.field_grid + (3,)``
     """
 
     geometry: Geometry
@@ -182,7 +183,9 @@ class PairResult:
         z = np.load(d / "pair.npz")
         geom = s["geometry"]
         geometry = Geometry(grid=tuple(geom["grid"]), sample_size_nm=tuple(geom["sample_size_nm"]),
-                            thickness_nm=geom["thickness_nm"], height_nm=geom["height_nm"], Ms=geom["Ms"])
+                            thickness_nm=geom["thickness_nm"], height_nm=geom["height_nm"], Ms=geom["Ms"],
+                            field_window_nm=geom.get("field_window_nm"),
+                            fft_pad_factor=geom.get("fft_pad_factor", 2.0))
         st = dict(s["settings"])
         st["ms_bounds"] = tuple(st["ms_bounds"])
         history = {k[len("history_"):]: z[k].tolist() for k in z.files if k.startswith("history_")}

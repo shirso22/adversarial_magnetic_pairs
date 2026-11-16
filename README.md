@@ -57,6 +57,10 @@ python -m adversarial_pairs montecarlo --samples 100 --workers 8 --out results/m
 # The same seeded ensemble at several standoff heights
 python -m adversarial_pairs standoff --heights 5,10,20,30,50 --samples 100 --workers 8
 
+# Measure the field on a 128 nm plane centered on the 64 nm sample (captures the
+# field outside the sample); a window smaller than the sample crops it
+python -m adversarial_pairs pair --window 128 --out results/window128
+
 # Grid-resolution sensitivity at fixed physical sample size
 python -m adversarial_pairs grid --grids 32,64,128 --iters 3000
 
@@ -77,6 +81,8 @@ python -m adversarial_pairs pair --help
 | `--grid` | cells, `32` or `64x48` | 32 |
 | `--thickness` | film thickness (nm) | 1 |
 | `--Ms` | initial saturation magnetization (A/m) | 1e6 |
+| `--window` | measurement-plane size (nm), `128` or `128x96`, centered on the sample | sample footprint |
+| `--pad-factor` | FFT domain size / sample size (see *Forward model*) | 2 |
 | `--ms-mode` | `fixed` (both held), `free` (both vary), `first`, `second` | free |
 | `--ms-bounds` | bounds on Ms/Ms0 for the textures that vary | 1,5 |
 | `--mode` | `anchor` (each charge to its target) or `difference` (\|Q1−Q2\| = q) | anchor |
@@ -159,6 +165,44 @@ examples/        walkthrough notebook and quickstart script
 tests/           physics and regression tests
 legacy/          original notebook from the first submission
 ```
+
+## Measurement window
+
+`Geometry(field_window_nm=(Wx, Wy))` (CLI `--window`) sets the size of the
+measurement plane on which the field is computed and compared in the loss.
+The plane is centered on the sample. A window smaller than the sample crops
+the field. A larger one includes the field outside the sample footprint. The
+window uses the sample's cell size, so its size is rounded to a whole number
+of cells with the grid's parity (to stay exactly centered).
+`geometry.field_window_size_nm` gives the size actually used, and
+`geometry.field_extent_nm` its position. `B1` and `B2` then have shape
+`geometry.field_grid + (3,)`. Plots show the window with the sample outlined.
+
+For the Sec. 5 skyrmion–meron pair (450 iterations, h = 20 nm), the final
+NRMSE is 1.13% on the 64 nm footprint, 1.27% on 96 nm, 1.37% on 128 nm and
+1.77% on 192 nm. The charges are held at −1 and −0.5 in every case.
+
+## Forward model
+
+The field is computed by FFT on a zero-padded domain of
+`geometry.fft_grid` cells (`fft_pad_factor` × the sample per axis, and at
+least sample + window). That is the field of a periodic array of samples.
+The default factor of 2 reproduces the manuscript, but it leaves sizeable
+periodic-image error compared with an isolated film. For a bare skyrmion
+the maximum error, as a fraction of the peak field, is 19% (factor 2),
+2.2% (4), 0.3% (8) and 0.07% (16), measured against a direct dipole sum.
+The ambiguity holds with accurate padding: the Sec. 5 pair optimized with
+`fft_pad_factor=8` reaches 1.17% NRMSE, and 1.18% from the direct dipole
+sum. Use `--pad-factor 8` for quantitative work on isolated films.
+
+**Sign fix in 1.1.0.** Earlier versions had the wrong sign on the in-plane
+(volume-charge) term and on Bz. Their output equals the true field of the
+texture rotated by π about z, with Bz negated. That rotation preserves Q and
+the negation preserves the NRMSE, so charges and NRMSE values are unchanged.
+Textures and Bz maps saved by earlier versions, including those from
+`legacy/Adversarial_Pairs.ipynb`, need the rotation
+`(mx, my, mz) -> (-mx, -my, mz)` to match the stray fields they were
+optimized for. The kernel is now tested against a direct dipole sum.
 
 ## Notes on conventions
 
