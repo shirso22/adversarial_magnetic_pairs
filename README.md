@@ -248,3 +248,7 @@ optimized for. The kernel is now tested against a direct dipole sum.
   coordinates on [−1/2, 1/2].
 - The NRMSE is the per-component RMS of B1 − B2 divided by the mean field
   magnitude, averaged over the two textures.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

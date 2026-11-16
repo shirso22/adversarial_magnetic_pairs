@@ -9,6 +9,8 @@ description = "Topologically distinct magnetization textures with near-identical
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Shirsopratim Chattopadhyay" }]
+license = { text = "MIT" }
+classifiers = ["License :: OSI Approved :: MIT License"]
 dependencies = ["numpy", "scipy", "matplotlib", "torch>=1.13"]
 
 [project.optional-dependencies]
