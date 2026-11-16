@@ -12,9 +12,9 @@ import dataclasses
 import json
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -37,6 +37,10 @@ class MonteCarloConfig:
     charge_grid     : initial charges are snapped to multiples of this to
                       define the targets (0.25 covers +-1, +-0.5, +-0.25, 0)
     n_workers       : processes to use (1 = run serially in this process)
+    texture_params  : extra parameters per class, merged over the random ones,
+                      e.g. {"skyrmion": {"radius_nm": 10}, "meron": {"radius_nm": 6}}
+    save_pairs      : also keep each optimized pair (m1, m2, B1, B2, Ms) and
+                      write it to ``pairs/sample_XXXX.npz`` on save
     """
 
     n_samples: int = 100
@@ -47,8 +51,11 @@ class MonteCarloConfig:
     charge_grid: float = 0.25
     seed: int = 0
     n_workers: int = 1
+    texture_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    save_pairs: bool = False
 
     def __post_init__(self):
+        self.texture_params = {canonical_name(k): dict(v) for k, v in (self.texture_params or {}).items()}
         self.texture_classes = tuple(canonical_name(t) for t in self.texture_classes)
         if self.first_texture is not None:
             self.first_texture = canonical_name(self.first_texture)
@@ -63,6 +70,7 @@ class MonteCarloResult:
     config: MonteCarloConfig
     settings: OptimizerSettings
     records: List[dict]
+    pairs: Dict[int, Dict[str, np.ndarray]] = field(default_factory=dict)
 
     def column(self, key: str) -> np.ndarray:
         return np.array([r[key] for r in self.records], dtype=float)
@@ -81,6 +89,9 @@ class MonteCarloResult:
             "Ms1_ratio_std": float(self.column("Ms1_ratio").std()),
             "Ms2_ratio_mean": float(self.column("Ms2_ratio").mean()),
             "Ms2_ratio_std": float(self.column("Ms2_ratio").std()),
+            "Ms2_over_Ms1_mean": float(self.column("Ms2_over_Ms1").mean()),
+            "Ms2_over_Ms1_std": float(self.column("Ms2_over_Ms1").std()),
+            "fraction_stopped_early": float(self.column("stopped_early").mean()),
             "fraction_nrmse_below_2pct": float((nrmse_f < 0.02).mean()),
         }
         if self.config.mode == "anchor":
@@ -114,6 +125,11 @@ class MonteCarloResult:
                 "geometry": self.geometry.to_dict(), "config": dataclasses.asdict(self.config),
                 "settings": dataclasses.asdict(self.settings)}
         (d / "summary.json").write_text(json.dumps(meta, indent=2))
+        if self.pairs:
+            pd = d / "pairs"
+            pd.mkdir(exist_ok=True)
+            for i, arrays in sorted(self.pairs.items()):
+                np.savez_compressed(pd / f"sample_{i:04d}.npz", **arrays)
         return d
 
 
@@ -127,13 +143,17 @@ def run_sample(index: int, geometry: Geometry, cfg: MonteCarloConfig,
                settings: OptimizerSettings, device: str = "cpu") -> dict:
     """Run Monte Carlo sample ``index`` (deterministic given cfg.seed)."""
     rng = np.random.default_rng([cfg.seed, index])
-    gen = torch.Generator().manual_seed(int(rng.integers(2 ** 62)))
+    sample_seed = int(rng.integers(2 ** 62))
+    gen = torch.Generator().manual_seed(sample_seed)
     t1, p1, t2, p2 = _draw_pair(cfg, rng)
-    m1 = perturb(make_texture(t1, geometry.grid, **p1), cfg.perturbation, gen)
-    m2 = perturb(make_texture(t2, geometry.grid, **p2), cfg.perturbation, gen)
+    p1 = {**p1, **cfg.texture_params.get(t1, {})}
+    p2 = {**p2, **cfg.texture_params.get(t2, {})}
+    L = geometry.sample_size_nm
+    m1 = perturb(make_texture(t1, geometry.grid, sample_size_nm=L, **p1), cfg.perturbation, gen)
+    m2 = perturb(make_texture(t2, geometry.grid, sample_size_nm=L, **p2), cfg.perturbation, gen)
     res = optimize_pair(m1, m2, geometry, settings=settings, mode=cfg.mode,
-                        charge_grid=cfg.charge_grid, labels=(t1, t2), device=device)
-    return {
+                        charge_grid=cfg.charge_grid, labels=(t1, t2), device=device, seed=sample_seed)
+    rec = {
         "index": index, "texture1": t1, "texture2": t2,
         "params1": json.dumps(p1), "params2": json.dumps(p2),
         "Q1_initial": res.initial["Q1"], "Q2_initial": res.initial["Q2"],
@@ -142,11 +162,20 @@ def run_sample(index: int, geometry: Geometry, cfg: MonteCarloConfig,
         "Q2_target": res.targets["Q2"] if res.targets["Q2"] is not None else float("nan"),
         "q_target": res.targets["q"] if res.targets["q"] is not None else float("nan"),
         "Q1": res.Q1, "Q2": res.Q2, "nrmse": res.nrmse,
+        "charge_error": res.charge_error, "charge_constraint_met": res.charge_constraint_met,
+        "Ms1_A_per_m": res.Ms1, "Ms2_A_per_m": res.Ms2,
         "Ms1_ratio": res.Ms1 / geometry.Ms, "Ms2_ratio": res.Ms2 / geometry.Ms,
+        "Ms2_over_Ms1": res.Ms_ratio,
         "mean_abs_dB_T": res.mean_field_difference_T,
         "max_abs_dB_T": res.max_field_difference_T,
+        "n_iter_run": res.n_iter_run, "stopped_early": res.stopped_early,
         "height_nm": geometry.height_nm,
+        "seed": cfg.seed, "sample_seed": sample_seed,
     }
+    if cfg.save_pairs:
+        rec["_pair"] = {"m1": res.m1, "m2": res.m2, "B1": res.B1, "B2": res.B2,
+                        "Ms": np.array([res.Ms1, res.Ms2])}
+    return rec
 
 
 def _worker(args):
@@ -169,18 +198,26 @@ def run_monte_carlo(geometry: Optional[Geometry] = None, config: Optional[MonteC
             nr = np.mean([r["nrmse"] for r in records]) * 100
             print(f"  {n}/{config.n_samples} samples | mean final NRMSE {nr:.2f}%", flush=True)
 
+    pairs: Dict[int, Dict[str, np.ndarray]] = {}
+
+    def keep(rec):
+        arrays = rec.pop("_pair", None)
+        if arrays is not None:
+            pairs[rec["index"]] = arrays
+        records.append(rec)
+
     if config.n_workers > 1:
         # autograd cannot run in fork()ed children once the parent has used it
         ctx = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(max_workers=config.n_workers, mp_context=ctx) as ex:
             for rec in ex.map(_worker, tasks):
-                records.append(rec)
+                keep(rec)
                 report(len(records))
     else:
         for t in tasks:
-            records.append(run_sample(*t))
+            keep(run_sample(*t))
             report(len(records))
-    return MonteCarloResult(geometry=geometry, config=config, settings=settings, records=records)
+    return MonteCarloResult(geometry=geometry, config=config, settings=settings, records=records, pairs=pairs)
 
 
 def standoff_sweep(heights_nm: Sequence[float], geometry: Optional[Geometry] = None,

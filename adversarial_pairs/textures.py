@@ -10,6 +10,12 @@ helicity = pi/2 gives a Bloch (circulating) texture, 0 a Neel (radial) one.
 
 Use :func:`make_texture` with a registered name, or :func:`parse_texture`
 for CLI-style strings such as ``"skyrmion:polarity=-1,radius=0.25"``.
+
+Texture size in physical units: pass ``radius_nm`` (with ``sample_size_nm``)
+instead of ``radius`` to set the profile width l in nm independently of the
+box size, e.g. to choose h / l directly. It is converted with the x
+half-width, radius = radius_nm / (Lx / 2); on a non-square sample the
+normalized coordinates make the texture elliptical, as for ``radius``.
 """
 from __future__ import annotations
 
@@ -102,9 +108,34 @@ def canonical_name(name: str) -> str:
     return key
 
 
-def make_texture(name: str, grid: Tuple[int, int], **params) -> torch.Tensor:
-    """Build a registered texture on ``grid``; ``params`` go to the generator."""
-    return TEXTURES[canonical_name(name)](grid[0], grid[1], **params)
+def physical_params(params: dict, sample_size_nm: Optional[Tuple[float, float]] = None) -> dict:
+    """Convert ``radius_nm`` / ``center_nm`` (nm, sample frame with the
+    origin at the sample center) into the normalized ``radius`` / ``center``."""
+    params = dict(params)
+    if "radius_nm" in params or "center_nm" in params:
+        if sample_size_nm is None:
+            raise ValueError("radius_nm / center_nm need sample_size_nm (pass the geometry's sample size)")
+        half_x, half_y = sample_size_nm[0] / 2.0, sample_size_nm[1] / 2.0
+    if "radius_nm" in params:
+        if "radius" in params:
+            raise ValueError("give either radius or radius_nm, not both")
+        r = float(params.pop("radius_nm"))
+        if r <= 0:
+            raise ValueError("radius_nm must be positive")
+        params["radius"] = r / half_x
+    if "center_nm" in params:
+        if "center" in params:
+            raise ValueError("give either center or center_nm, not both")
+        cx, cy = params.pop("center_nm")
+        params["center"] = (float(cx) / half_x, float(cy) / half_y)
+    return params
+
+
+def make_texture(name: str, grid: Tuple[int, int], sample_size_nm: Optional[Tuple[float, float]] = None,
+                 **params) -> torch.Tensor:
+    """Build a registered texture on ``grid``; ``params`` go to the generator.
+    ``radius_nm``/``center_nm`` are accepted when ``sample_size_nm`` is given."""
+    return TEXTURES[canonical_name(name)](grid[0], grid[1], **physical_params(params, sample_size_nm))
 
 
 def register_texture(name: str, fn: Callable[..., torch.Tensor]) -> None:

@@ -15,6 +15,18 @@ def _extent(result: PairResult):
     return [0, Ly, 0, Lx]
 
 
+def _field_extent(result: PairResult):
+    x0, x1, y0, y1 = result.geometry.field_extent_nm
+    return [y0, y1, x0, x1]
+
+
+def _outline_sample(a, result: PairResult):
+    """Dashed outline of the sample footprint on a field panel."""
+    from matplotlib.patches import Rectangle
+    Lx, Ly = result.geometry.sample_size_nm
+    a.add_patch(Rectangle((0, 0), Ly, Lx, fill=False, ls="--", lw=1, ec="w", alpha=0.8))
+
+
 def plot_history(result: PairResult):
     h = result.history
     fig, ax = plt.subplots(1, 3, figsize=(15, 4))
@@ -24,7 +36,8 @@ def plot_history(result: PairResult):
     ax[1].plot(h["Q2"], label=f"Q2 ({result.labels[1]})")
     ax[1].set(xlabel="iteration", ylabel="topological charge", title="Charge trajectory")
     ax[1].legend()
-    ax[2].plot(h["Ms1_ratio"], label="Ms1")
+    if not result.target_field:
+        ax[2].plot(h["Ms1_ratio"], label="Ms1")
     ax[2].plot(h["Ms2_ratio"], label="Ms2")
     ax[2].set(xlabel="iteration", ylabel="Ms / Ms0", title="Saturation magnetization")
     ax[2].legend()
@@ -41,24 +54,36 @@ def plot_pair(result: PairResult):
     b1 = np.linalg.norm(result.B1, axis=-1) * 1e3
     b2 = np.linalg.norm(result.B2, axis=-1) * 1e3
     db = np.linalg.norm(result.B1 - result.B2, axis=-1) * 1e3
-    mlim = np.abs([Mz1, Mz2]).max()
+    mlim = np.nanmax(np.abs([Mz1, Mz2]))
     bmin, bmax = min(b1.min(), b2.min()), max(b1.max(), b2.max())
 
     fig, ax = plt.subplots(2, 3, figsize=(16, 9.5))
+    # (axis, data, cmap, vmin, vmax, colorbar label, title, is a field panel)
     panels = [
-        (ax[0, 0], Mz1, "RdBu", -mlim, mlim, "$M_z$ (A/m)", f"$M_z$ {result.labels[0]}, Q = {result.Q1:+.3f}"),
-        (ax[0, 1], Mz2, "RdBu", -mlim, mlim, "$M_z$ (A/m)", f"$M_z$ {result.labels[1]}, Q = {result.Q2:+.3f}"),
-        (ax[1, 0], b1, "viridis", bmin, bmax, "|B| (mT)", f"|B| {result.labels[0]}"),
-        (ax[1, 1], b2, "viridis", bmin, bmax, "|B| (mT)", f"|B| {result.labels[1]}"),
+        (ax[0, 0], Mz1, "RdBu", -mlim, mlim, "$M_z$ (A/m)", f"$M_z$ {result.labels[0]}, Q = {result.Q1:+.3f}", False),
+        (ax[0, 1], Mz2, "RdBu", -mlim, mlim, "$M_z$ (A/m)", f"$M_z$ {result.labels[1]}, Q = {result.Q2:+.3f}", False),
+        (ax[1, 0], b1, "viridis", bmin, bmax, "|B| (mT)", f"|B| {result.labels[0]}", True),
+        (ax[1, 1], b2, "viridis", bmin, bmax, "|B| (mT)", f"|B| {result.labels[1]}", True),
         (ax[1, 2], db, "magma", 0, db.max(), "|B1 - B2| (mT)",
-         f"|B1 - B2|, NRMSE {result.nrmse * 100:.2f}%, peak {db.max():.3g} mT"),
+         f"|B1 - B2|, NRMSE {result.nrmse * 100:.2f}%, peak {db.max():.3g} mT", True),
     ]
-    for a, data, cmap, vmin, vmax, clabel, title in panels:
-        im = a.imshow(data, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, extent=ext)
+    fext = _field_extent(result)
+    windowed = result.geometry.field_window_nm is not None
+    for a, data, cmap, vmin, vmax, clabel, title, is_field in panels:
+        im = a.imshow(data, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax,
+                      extent=fext if is_field else ext)
+        if is_field and windowed:
+            _outline_sample(a, result)
         a.set(title=title, xlabel="y (nm)", ylabel="x (nm)")
         fig.colorbar(im, ax=a, label=clabel)
+    if result.target_field:
+        ax[0, 0].set_title("target field (no magnetization)")
     _quiver(ax[0, 2], result)
-    fig.suptitle(f"h = {result.geometry.height_nm:g} nm, "
+    win = ""
+    if windowed:
+        wx, wy = result.geometry.field_window_size_nm
+        win = f"field window {wx:g} x {wy:g} nm (sample dashed), "
+    fig.suptitle(f"h = {result.geometry.height_nm:g} nm, {win}"
                  f"Ms = {result.Ms1:.3g} / {result.Ms2:.3g} A/m", fontsize=13)
     fig.tight_layout()
     return fig

@@ -2,8 +2,9 @@
 
 Commands
   pair        optimize one adversarial pair (+ optional multipole / k-space analysis)
+  fit         match one texture to a supplied field map (.npy, tesla)
   montecarlo  random ensemble with statistical validation
-  standoff    Monte Carlo ensemble at several standoff heights
+  standoff    one pair (--single) or a Monte Carlo ensemble at several standoff heights
   grid        grid-resolution sensitivity of one pair
   analyze     multipole + k-space analysis of a saved pair
   textures    list available texture classes
@@ -16,7 +17,7 @@ import json
 from pathlib import Path
 
 from .geometry import Geometry
-from .optimize import MS_MODES, OptimizerSettings
+from .optimize import FIELD_METRICS, MS_ALIASES, MS_MODES, OptimizerSettings
 
 
 def _floats(text):
@@ -41,16 +42,29 @@ def _add_geometry(p):
     g.add_argument("--thickness", type=float, default=1.0, help="film thickness in nm (default 1)")
     g.add_argument("--height", type=float, default=20.0, help="standoff height in nm (default 20)")
     g.add_argument("--Ms", type=float, default=1e6, help="initial saturation magnetization, A/m (default 1e6)")
+    g.add_argument("--window", type=_pair_of(float), default=None,
+                   help="measurement-plane size in nm, centered on the sample, e.g. 128 or 128x96 "
+                        "(default: the sample footprint)")
+    g.add_argument("--pad-factor", type=float, default=2.0,
+                   help="FFT domain size / sample size; larger approaches an isolated film (default 2)")
 
 
 def _add_settings(p):
     s = p.add_argument_group("optimizer")
-    s.add_argument("--iters", type=int, default=450, help="iterations (default 450)")
+    s.add_argument("--iters", type=int, default=450, help="maximum iterations (default 450)")
+    s.add_argument("--tol", type=float, default=None,
+                   help="stop early once NRMSE <= tol and the charge constraint is met (e.g. 0.01)")
+    s.add_argument("--metric", choices=FIELD_METRICS, default="nrmse",
+                   help="field term of the loss: relative NRMSE (default) or mean |B1-B2| "
+                        "over the initial mean field")
     s.add_argument("--lr", type=float, default=1e-2)
     s.add_argument("--gamma", type=float, default=1e-3, help="smoothness weight")
     s.add_argument("--beta0", type=float, default=1.0, help="initial topology weight")
-    s.add_argument("--ms-mode", choices=sorted(MS_MODES), default="free",
-                   help="which saturation magnetizations may vary (default free)")
+    s.add_argument("--ms-mode", choices=sorted(MS_MODES) + sorted(MS_ALIASES), default="free",
+                   help="which saturation magnetizations may vary; 'shared' ties one Ms to both "
+                        "textures (default free = independent)")
+    s.add_argument("--freeze", type=lambda t: tuple(int(v) for v in t.split(",")), default=(),
+                   help="keep texture 1 or 2 fixed, e.g. --freeze 1 optimizes only texture 2")
     s.add_argument("--ms-bounds", type=_floats, default=[1.0, 5.0], help="bounds on Ms/Ms0 (default 1,5)")
     s.add_argument("--smoothness-on", choices=["M", "m"], default="M")
     s.add_argument("--charge-tol", type=float, default=1e-2)
@@ -77,23 +91,37 @@ def _add_mc(p):
     m.add_argument("--perturbation", type=float, default=0.01)
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--workers", type=int, default=1, help="parallel processes")
+    m.add_argument("--radius-nm", type=float, default=None,
+                   help="profile width (nm) of all cored textures (default: generator default)")
+    m.add_argument("--save-pairs", action="store_true",
+                   help="also write every optimized pair to pairs/sample_XXXX.npz")
 
 
 def _geometry(a):
-    return Geometry(grid=a.grid, sample_size_nm=a.size, thickness_nm=a.thickness, height_nm=a.height, Ms=a.Ms)
+    return Geometry(grid=a.grid, sample_size_nm=a.size, thickness_nm=a.thickness, height_nm=a.height, Ms=a.Ms,
+                    field_window_nm=a.window, fft_pad_factor=a.pad_factor)
 
 
 def _settings(a):
     return OptimizerSettings(n_iter=a.iters, lr=a.lr, gamma=a.gamma, beta0=a.beta0, ms_mode=a.ms_mode,
                              ms_bounds=tuple(a.ms_bounds), smoothness_on=a.smoothness_on,
-                             charge_tol=a.charge_tol, log_every=getattr(a, "log_every", 0))
+                             charge_tol=a.charge_tol, metric=a.metric, tol=a.tol, freeze=a.freeze,
+                             log_every=getattr(a, "log_every", 0))
 
 
 def _mc_config(a):
     from .montecarlo import MonteCarloConfig
-    return MonteCarloConfig(n_samples=a.samples, texture_classes=tuple(a.classes.split(",")),
+    from .textures import canonical_name
+    classes = tuple(a.classes.split(","))
+    tparams = {}
+    if a.radius_nm is not None:
+        for c in set(classes) | ({a.first} if a.first else set()):
+            if canonical_name(c) != "uniform":
+                tparams[canonical_name(c)] = {"radius_nm": a.radius_nm}
+    return MonteCarloConfig(n_samples=a.samples, texture_classes=classes,
                             first_texture=a.first, perturbation=a.perturbation, mode=a.mode,
-                            charge_grid=a.charge_grid, seed=a.seed, n_workers=a.workers)
+                            charge_grid=a.charge_grid, seed=a.seed, n_workers=a.workers,
+                            texture_params=tparams, save_pairs=a.save_pairs)
 
 
 def _save_fig(fig, path):
@@ -127,7 +155,7 @@ def cmd_pair(a):
     res = generate_pair(a.texture1, a.texture2, _geometry(a), perturbation=a.perturbation, seed=a.seed,
                         settings=_settings(a), mode=a.mode, Q1_target=a.Q1, Q2_target=a.Q2, q=a.q,
                         charge_grid=a.charge_grid, device=a.device)
-    res.save(out)
+    res.save(out, history_every=a.history_every)
     print(res)
     if not a.no_plots:
         from . import plotting
@@ -135,6 +163,20 @@ def cmd_pair(a):
         _save_fig(plotting.plot_pair(res), out / "pair.png")
     if a.analyze:
         _analyze(res, out, a.order, a.source, not a.no_plots)
+    print(f"\nresults written to {out}/")
+
+
+def cmd_fit(a):
+    from .optimize import fit_target_field
+    out = Path(a.out)
+    res = fit_target_field(a.target_field, a.texture, _geometry(a), Q_target=a.Q, charge_grid=a.charge_grid,
+                           perturbation=a.perturbation, seed=a.seed, settings=_settings(a), device=a.device)
+    res.save(out, history_every=a.history_every)
+    print(res)
+    if not a.no_plots:
+        from . import plotting
+        _save_fig(plotting.plot_history(res), out / "history.png")
+        _save_fig(plotting.plot_pair(res), out / "pair.png")
     print(f"\nresults written to {out}/")
 
 
@@ -158,17 +200,30 @@ def cmd_montecarlo(a):
 
 
 def cmd_standoff(a):
-    from .montecarlo import standoff_sweep
+    from .analysis import format_rows, write_rows_csv
     out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    if a.single:
+        from .analysis import standoff_sensitivity
+        rows = standoff_sensitivity(a.heights, a.texture1, a.texture2, _geometry(a), settings=_settings(a),
+                                    mode=a.mode, charge_grid=a.charge_grid, device=a.device)
+        (out / "standoff_summary.json").write_text(json.dumps(rows, indent=2))
+        write_rows_csv(rows, out / "standoff_summary.csv")
+        print(format_rows(rows))
+        return
+    from .montecarlo import standoff_sweep
     sweep = standoff_sweep(a.heights, _geometry(a), _mc_config(a), _settings(a), device=a.device)
     rows = []
     for h, mc in sorted(sweep.items()):
         mc.save(out / f"h_{h:g}nm")
         s = mc.summary()
         rows.append({"height_nm": h, "nrmse_mean": s["final_nrmse_mean"], "nrmse_std": s["final_nrmse_std"],
-                     "mean_abs_dB_T": float(mc.column("mean_abs_dB_T").mean())})
+                     "nrmse_median": s["final_nrmse_median"],
+                     "mean_abs_dB_T": float(mc.column("mean_abs_dB_T").mean()),
+                     "mean_abs_dB_T_std": float(mc.column("mean_abs_dB_T").std()),
+                     "fraction_charge_within_tol": s["fraction_charge_within_tol"]})
     (out / "standoff_summary.json").write_text(json.dumps(rows, indent=2))
-    from .analysis import format_rows
+    write_rows_csv(rows, out / "standoff_summary.csv")
     print(format_rows(rows))
     if not a.no_plots:
         from . import plotting
@@ -219,10 +274,26 @@ def build_parser():
     sp.add_argument("--seed", type=int, default=None)
     sp.add_argument("--analyze", action="store_true", help="also run multipole + k-space analysis")
     sp.add_argument("--log-every", type=int, default=50)
+    sp.add_argument("--history-every", type=int, default=1, help="history.csv stride in iterations (default 1)")
     analysis_opts(sp)
     _add_geometry(sp); _add_settings(sp); _add_charge(sp)
     common_out(sp, "results/pair")
     sp.set_defaults(func=cmd_pair)
+
+    sp = sub.add_parser("fit", help="match one texture to a supplied field map")
+    sp.add_argument("--target-field", required=True,
+                    help="field map in tesla on the measurement window: .npy of shape (wx, wy, 3), "
+                         "or (wx, wy) for Bz only; or a pair.npz (uses its B1)")
+    sp.add_argument("--texture", default="skyrmion", help="initial texture of the fit")
+    sp.add_argument("--Q", type=float, default=None, help="target charge (default: initial charge)")
+    sp.add_argument("--charge-grid", type=float, default=None)
+    sp.add_argument("--perturbation", type=float, default=0.0)
+    sp.add_argument("--seed", type=int, default=None)
+    sp.add_argument("--log-every", type=int, default=50)
+    sp.add_argument("--history-every", type=int, default=1)
+    _add_geometry(sp); _add_settings(sp)
+    common_out(sp, "results/fit")
+    sp.set_defaults(func=cmd_fit)
 
     sp = sub.add_parser("analyze", help="multipole + k-space analysis of a saved pair")
     sp.add_argument("pair", help="directory written by the 'pair' command")
@@ -235,9 +306,13 @@ def build_parser():
     common_out(sp, "results/montecarlo")
     sp.set_defaults(func=cmd_montecarlo)
 
-    sp = sub.add_parser("standoff", help="Monte Carlo ensemble at several standoff heights")
+    sp = sub.add_parser("standoff", help="one pair (--single) or an ensemble at several standoff heights")
     sp.add_argument("--heights", type=_floats, default=[5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
                     help="comma-separated heights in nm")
+    sp.add_argument("--single", action="store_true",
+                    help="sweep one pair (--texture1/--texture2) instead of a Monte Carlo ensemble")
+    sp.add_argument("--texture1", default="skyrmion")
+    sp.add_argument("--texture2", default="meron")
     _add_mc(sp); _add_geometry(sp); _add_settings(sp); _add_charge(sp, mc=True)
     common_out(sp, "results/standoff")
     sp.set_defaults(func=cmd_standoff)

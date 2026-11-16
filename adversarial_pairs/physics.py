@@ -26,10 +26,27 @@ class StrayFieldOperator:
     The k-space kernel is built once per (geometry, height, device) and reused,
     so calling the operator inside an optimization loop is cheap.
 
-    Kernel (film of thickness t, measured at height h above it):
+    Kernel (film occupying -t < z < 0, measured at z = h above its top
+    surface; Fourier convention f(k) = sum f(r) e^{-i k.r}):
         F(k)   = (mu0 / 2) (1 - e^{-k t}) e^{-k h}
-        phi(k) = F(k) [ Mz / k + i (k . M_par) / k^2 ]
-        B      = ( -i kx phi, -i ky phi, -k phi ),  B(k = 0) = 0
+        phi(k) = F(k) [ Mz / k - i (k . M_par) / k^2 ]
+        B      = ( -i kx phi, -i ky phi, +k phi ),  B(k = 0) = 0
+    i.e. B = -mu0 grad(Psi) with Psi sourced by the face charges +-Ms mz and
+    the volume charge -div(M_par). Checked against a direct dipole sum in
+    ``tests/test_core.py``.
+
+    Versions before 1.1.0 had the opposite sign on the in-plane term and on
+    Bz, which equals the true field of the texture rotated by pi about z,
+    with Bz negated. That rotation preserves Q and the negation preserves the
+    NRMSE, so optimized pairs, charges and NRMSE values are unchanged up to
+    that rotation; saved textures and Bz maps from those versions are not.
+
+    The output is the field on the measurement window of ``geometry``
+    (``geometry.field_grid`` cells, centered on the sample). The FFT domain
+    is zero-padded to ``geometry.fft_grid`` cells per axis (by default
+    2 * nx, and at least nx + wx), so the computed field is that of a periodic
+    array of samples; increase ``geometry.fft_pad_factor`` to approach an
+    isolated film.
     """
 
     def __init__(self, geometry: Geometry, height_nm: Optional[float] = None,
@@ -42,8 +59,13 @@ class StrayFieldOperator:
     def _build_kernel(self):
         g = self.geometry
         nx, ny = g.grid
-        self.nx_pad, self.ny_pad = 2 * nx, 2 * ny
-        self.pad_x, self.pad_y = nx // 2, ny // 2
+        wx, wy = g.field_grid
+        self.nx_pad, self.ny_pad = g.fft_grid
+        # sample position in the padded array; reduces to (nx//2, ny//2) by default
+        self.pad_x, self.pad_y = (self.nx_pad - nx) // 2, (self.ny_pad - ny) // 2
+        ox, oy = g.field_offset_cells
+        self.win_x = slice(self.pad_x + ox, self.pad_x + ox + wx)
+        self.win_y = slice(self.pad_y + oy, self.pad_y + oy + wy)
 
         kx = 2.0 * math.pi * torch.fft.fftfreq(self.nx_pad, d=g.dx_m, dtype=DTYPE)
         ky = 2.0 * math.pi * torch.fft.rfftfreq(self.ny_pad, d=g.dy_m, dtype=DTYPE)
@@ -58,19 +80,20 @@ class StrayFieldOperator:
         cplx = torch.complex128
         # phi = a_z * Mz + a_x * Mx + a_y * My
         a_z = (F / k_safe).to(cplx)
-        a_x = (1j * F * kx / k_safe ** 2).to(cplx)
-        a_y = (1j * F * ky / k_safe ** 2).to(cplx)
+        a_x = (-1j * F * kx / k_safe ** 2).to(cplx)
+        a_y = (-1j * F * ky / k_safe ** 2).to(cplx)
         # B_j = d_j * phi
         d_x = (-1j * kx).to(cplx)
         d_y = (-1j * ky).to(cplx)
-        d_z = (-k).to(cplx)
+        d_z = k.to(cplx)
 
         dev = self.device
         self._a = torch.stack([a_x, a_y, a_z], dim=-1).to(dev)   # (kx, ky, 3)
         self._d = torch.stack([d_x, d_y, d_z], dim=-1).to(dev)   # (kx, ky, 3)
 
     def __call__(self, M: torch.Tensor) -> torch.Tensor:
-        """Stray field (T) of magnetization ``M`` (A/m), shape (nx, ny, 3)."""
+        """Stray field (T) of magnetization ``M`` (A/m), shape (nx, ny, 3).
+        Returns shape (wx, wy, 3) on the measurement window."""
         nx, ny = self.geometry.grid
         if tuple(M.shape) != (nx, ny, 3):
             raise ValueError(f"expected M of shape {(nx, ny, 3)}, got {tuple(M.shape)}")
@@ -81,7 +104,7 @@ class StrayFieldOperator:
         phi = (self._a * Mk).sum(dim=-1, keepdim=True)
         Bk = self._d * phi
         Bp = torch.fft.irfftn(Bk, s=(self.nx_pad, self.ny_pad), dim=(0, 1), norm="forward")
-        return Bp[self.pad_x:self.pad_x + nx, self.pad_y:self.pad_y + ny]
+        return Bp[self.win_x, self.win_y]
 
 
 def stray_field(M: torch.Tensor, geometry: Geometry, height_nm: Optional[float] = None) -> torch.Tensor:

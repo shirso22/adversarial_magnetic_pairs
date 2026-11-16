@@ -25,6 +25,8 @@ def source_density(result: PairResult, which: int, source: str = "mz") -> np.nda
     source="mz"     : surface-charge source s * m_z (manuscript convention)
     source="volume" : volume charge -s * div(m_par), per nm
     """
+    if which == 1 and result.target_field:
+        raise ValueError("texture 1 of a target-field fit is a field, not a magnetization")
     m = result.m1 if which == 1 else result.m2
     s = (result.Ms1 if which == 1 else result.Ms2) / result.geometry.Ms
     if source == "mz":
@@ -108,17 +110,18 @@ def kspace_localization(result: PairResult, n_bins: int = 64, power_fraction: fl
     """
     g = result.geometry
     B1, B2 = result.B1, result.B2
+    wx, wy = B1.shape[:2]           # measurement window (may differ from the sample grid)
     F1 = np.fft.fftshift(np.fft.fft2(B1, axes=(0, 1)), axes=(0, 1))
     F2 = np.fft.fftshift(np.fft.fft2(B2, axes=(0, 1)), axes=(0, 1))
     p1 = (np.abs(F1) ** 2).sum(-1)
     p2 = (np.abs(F2) ** 2).sum(-1)
     dd = (np.abs(F1 - F2) ** 2).sum(-1)
 
-    kx = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(g.nx, d=g.dx_nm))
-    ky = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(g.ny, d=g.dy_nm))
+    kx = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(wx, d=g.dx_nm))
+    ky = 2 * np.pi * np.fft.fftshift(np.fft.fftfreq(wy, d=g.dy_nm))
     K = np.sqrt(kx[:, None] ** 2 + ky[None, :] ** 2)
 
-    n_bins = min(n_bins, min(g.nx, g.ny) // 2)
+    n_bins = max(1, min(n_bins, min(wx, wy) // 2))
     edges = np.linspace(0.0, K.max() / np.sqrt(2.0), n_bins + 1)
     kc = 0.5 * (edges[:-1] + edges[1:])
     idx = np.clip(np.digitize(K.ravel(), edges) - 1, 0, n_bins - 1)
@@ -154,8 +157,10 @@ def kspace_localization(result: PairResult, n_bins: int = 64, power_fraction: fl
 # --------------------------------------------------------------------------- #
 def _row(label: str, value, res: PairResult) -> dict:
     return {label: value, "nrmse": res.nrmse, "Q1": res.Q1, "Q2": res.Q2,
+            "charge_constraint_met": res.charge_constraint_met,
             "Ms1_ratio": res.Ms1 / res.geometry.Ms, "Ms2_ratio": res.Ms2 / res.geometry.Ms,
-            "mean_abs_dB_T": res.mean_field_difference_T}
+            "Ms2_over_Ms1": res.Ms_ratio,
+            "mean_abs_dB_T": res.mean_field_difference_T, "n_iter_run": res.n_iter_run}
 
 
 def grid_sensitivity(grids: Sequence[Tuple[int, int]], texture1: TextureArg = "skyrmion",
@@ -190,6 +195,17 @@ def weight_sensitivity(name: str, values: Sequence[float], texture1: TextureArg 
     return [_row(name, v, generate_pair(texture1, texture2, geometry,
                                         settings=settings.replace(**{name: v}), **pair_kwargs))
             for v in values]
+
+
+def write_rows_csv(rows: List[dict], path) -> None:
+    """Write the rows of a sensitivity sweep to CSV."""
+    import csv
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
 
 
 def format_rows(rows: List[dict]) -> str:
