@@ -8,17 +8,19 @@ Quick start::
     print(res)
 """
 from .geometry import Geometry
-from .optimize import MS_MODES, OptimizerSettings, PairResult, generate_pair, optimize_pair
+from .optimize import (FIELD_METRICS, MS_MODES, OptimizerSettings, PairResult, fit_target_field,
+                       generate_pair, load_field, optimize_pair)
 from .physics import (StrayFieldOperator, nrmse, smoothness, stray_field, topological_charge,
                       topological_charge_finite_difference)
 from .textures import TEXTURES, make_texture, parse_texture, perturb, register_texture
 from .montecarlo import MonteCarloConfig, MonteCarloResult, run_monte_carlo, standoff_sweep
 from . import analysis
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
-    "Geometry", "OptimizerSettings", "PairResult", "MS_MODES", "generate_pair", "optimize_pair",
+    "Geometry", "OptimizerSettings", "PairResult", "MS_MODES", "FIELD_METRICS", "generate_pair",
+    "optimize_pair", "fit_target_field", "load_field",
     "StrayFieldOperator", "stray_field", "topological_charge", "topological_charge_finite_difference",
     "nrmse", "smoothness", "TEXTURES", "make_texture", "parse_texture", "perturb", "register_texture",
     "MonteCarloConfig", "MonteCarloResult", "run_monte_carlo", "standoff_sweep", "analysis",

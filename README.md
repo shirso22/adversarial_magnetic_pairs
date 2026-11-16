@@ -61,6 +61,13 @@ python -m adversarial_pairs standoff --heights 5,10,20,30,50 --samples 100 --wor
 # field outside the sample); a window smaller than the sample crops it
 python -m adversarial_pairs pair --window 128 --out results/window128
 
+# Standoff sweep of a single pair (NRMSE etc. per height -> standoff_summary.csv)
+python -m adversarial_pairs standoff --single --texture1 skyrmion --texture2 meron \
+       --heights 5,10,20,30,50 --out results/standoff_pair
+
+# Fit one texture to a supplied field map (tesla, .npy on the measurement window)
+python -m adversarial_pairs fit --target-field B.npy --texture meron --Q -0.5 --out results/fit
+
 # Grid-resolution sensitivity at fixed physical sample size
 python -m adversarial_pairs grid --grids 32,64,128 --iters 3000
 
@@ -83,12 +90,17 @@ python -m adversarial_pairs pair --help
 | `--Ms` | initial saturation magnetization (A/m) | 1e6 |
 | `--window` | measurement-plane size (nm), `128` or `128x96`, centered on the sample | sample footprint |
 | `--pad-factor` | FFT domain size / sample size (see *Forward model*) | 2 |
-| `--ms-mode` | `fixed` (both held), `free` (both vary), `first`, `second` | free |
+| `--ms-mode` | `fixed` (both held), `free`/`independent` (both vary), `first`, `second`, `shared` (one Ms for both) | free |
+| `--metric` | field term: `nrmse` (relative) or `abs` (mean \|B1−B2\| over the initial mean field) | nrmse |
+| `--iters`, `--tol` | maximum iterations; stop early once NRMSE ≤ tol and the charge constraint holds | 450, none |
+| `--freeze` | keep texture `1` or `2` fixed and optimize only the other | none |
+| `--history-every` | stride of `history.csv` (iterations) | 1 |
+| `--radius-nm`, `--save-pairs` | Monte Carlo: texture width in nm for cored classes; save every pair's arrays | |
 | `--ms-bounds` | bounds on Ms/Ms0 for the textures that vary | 1,5 |
 | `--mode` | `anchor` (each charge to its target) or `difference` (\|Q1−Q2\| = q) | anchor |
 | `--Q1`, `--Q2`, `--q` | explicit charge targets | initial charges |
 | `--charge-grid` | snap initial charges to multiples of this to set the targets | none (pair), 0.25 (MC) |
-| `--iters`, `--lr`, `--gamma`, `--beta0` | optimizer settings | 450, 1e-2, 1e-3, 1 |
+| `--lr`, `--gamma`, `--beta0` | optimizer settings | 1e-2, 1e-3, 1 |
 | `--smoothness-on` | apply smoothness to `M` = s·m or to the unit field `m` | M |
 | `--workers` | parallel processes for Monte Carlo | 1 |
 
@@ -96,7 +108,9 @@ Textures: `skyrmion`, `antiskyrmion`, `meron` (alias `vortex`), `fractional`,
 `uniform`. Parameters include `polarity`, `radius` (as a fraction of the
 half-width), `helicity` (`pi/2` for Bloch, `0` for Néel), `winding` and
 `center`. `fractional` also takes `charge`, and `uniform` takes `theta_deg`
-and `phi_deg`.
+and `phi_deg`. `radius_nm` sets the width in nm instead of as a fraction of
+the box, so h/ℓ can be chosen directly: `--texture1 "skyrmion:radius_nm=8"`.
+In Python, `center_nm=(x, y)` positions the texture in nm.
 
 ## Python API
 
@@ -141,9 +155,9 @@ for a full run.
 
 | Command | Files |
 |---|---|
-| `pair` | `pair.npz` (m1, m2, B1, B2 in T, Ms, history), `summary.json`, `history.png`, `pair.png`, plus `multipoles_*.txt/png` and `kspace.json/png` with `--analyze` |
-| `montecarlo` | `samples.csv` (one row per sample), `summary.json` (ensemble statistics and per-pair-type breakdown), `mc_summary.png` |
-| `standoff` | one Monte Carlo folder per height, `standoff_summary.json`, `standoff.png` |
+| `pair`, `fit` | `pair.npz` (m1, m2, B1, B2 in T, Ms, full history), `summary.json`, `history.csv` (iteration, loss, NRMSE, mean \|ΔB\|, Q1, Q2, Ms1, Ms2 in A/m, Ms2/Ms1, β), `history.png`, `pair.png`, plus `multipoles_*.txt/png` and `kspace.json/png` with `--analyze` |
+| `montecarlo` | `samples.csv` (one row per run: texture classes and parameters, initial/target/final charges, charge error, final NRMSE and \|ΔB\|, Ms1, Ms2 and Ms2/Ms1, iterations, ensemble seed and per-sample seed), `summary.json`, `mc_summary.png`, and `pairs/sample_XXXX.npz` with `--save-pairs` |
+| `standoff` | `standoff_summary.csv/.json` (NRMSE and \|ΔB\| per height); without `--single`, also one Monte Carlo folder per height and `standoff.png` |
 
 Monte Carlo samples are seeded by `(seed, index)`. An ensemble is therefore
 reproducible regardless of `--workers`, and `standoff` runs the same initial
@@ -165,6 +179,29 @@ examples/        walkthrough notebook and quickstart script
 tests/           physics and regression tests
 legacy/          original notebook from the first submission
 ```
+
+## Optimizer variants
+
+- **Field metric.** `metric="nrmse"` (default) is scale-invariant: only the
+  ratio Ms2/Ms1 matters. `metric="abs"` minimizes mean |B1 − B2| relative to
+  the mean initial field magnitude (a fixed number), so it also penalizes the
+  overall field scale. NRMSE and mean |ΔB| are always reported.
+- **Shared Ms.** `ms_mode="shared"` ties one optimized Ms to both textures.
+  With the NRMSE metric this behaves exactly like `fixed` (the shared Ms only
+  feels the smoothness term). Like `fixed`, it needs `beta0=100` for the
+  skyrmion–meron case: at `beta0=1` the skyrmion unwinds. The Sec. 5 pair
+  reaches 1.81% NRMSE with equal Ms (1.13% with free Ms).
+- **Freeze.** `freeze=(1,)` keeps texture 1 (angles and Ms) unchanged and
+  optimizes texture 2 against its field. A frozen texture's charge is not
+  constrained. Sec. 5 case: 1.72% NRMSE.
+- **Target field.** `fit_target_field(B, texture, geometry, Q_target=...)`
+  (CLI `fit`) matches one texture to a supplied field map in tesla on the
+  measurement window. The map can be the full vector field `(wx, wy, 3)` or
+  Bz only `(wx, wy)`. The result stores the target as `B1` and the fitted
+  texture as texture 2 (m1, Q1 and Ms1 are NaN).
+- **Early stopping.** `tol` stops at the first iteration where NRMSE ≤ tol
+  and the charge constraint holds. `n_iter_run` and `stopped_early` are
+  recorded in the result.
 
 ## Measurement window
 

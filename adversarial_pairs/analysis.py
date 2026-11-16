@@ -25,6 +25,8 @@ def source_density(result: PairResult, which: int, source: str = "mz") -> np.nda
     source="mz"     : surface-charge source s * m_z (manuscript convention)
     source="volume" : volume charge -s * div(m_par), per nm
     """
+    if which == 1 and result.target_field:
+        raise ValueError("texture 1 of a target-field fit is a field, not a magnetization")
     m = result.m1 if which == 1 else result.m2
     s = (result.Ms1 if which == 1 else result.Ms2) / result.geometry.Ms
     if source == "mz":
@@ -155,8 +157,10 @@ def kspace_localization(result: PairResult, n_bins: int = 64, power_fraction: fl
 # --------------------------------------------------------------------------- #
 def _row(label: str, value, res: PairResult) -> dict:
     return {label: value, "nrmse": res.nrmse, "Q1": res.Q1, "Q2": res.Q2,
+            "charge_constraint_met": res.charge_constraint_met,
             "Ms1_ratio": res.Ms1 / res.geometry.Ms, "Ms2_ratio": res.Ms2 / res.geometry.Ms,
-            "mean_abs_dB_T": res.mean_field_difference_T}
+            "Ms2_over_Ms1": res.Ms_ratio,
+            "mean_abs_dB_T": res.mean_field_difference_T, "n_iter_run": res.n_iter_run}
 
 
 def grid_sensitivity(grids: Sequence[Tuple[int, int]], texture1: TextureArg = "skyrmion",
@@ -191,6 +195,17 @@ def weight_sensitivity(name: str, values: Sequence[float], texture1: TextureArg 
     return [_row(name, v, generate_pair(texture1, texture2, geometry,
                                         settings=settings.replace(**{name: v}), **pair_kwargs))
             for v in values]
+
+
+def write_rows_csv(rows: List[dict], path) -> None:
+    """Write the rows of a sensitivity sweep to CSV."""
+    import csv
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
 
 
 def format_rows(rows: List[dict]) -> str:

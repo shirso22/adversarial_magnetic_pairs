@@ -36,7 +36,8 @@ def plot_history(result: PairResult):
     ax[1].plot(h["Q2"], label=f"Q2 ({result.labels[1]})")
     ax[1].set(xlabel="iteration", ylabel="topological charge", title="Charge trajectory")
     ax[1].legend()
-    ax[2].plot(h["Ms1_ratio"], label="Ms1")
+    if not result.target_field:
+        ax[2].plot(h["Ms1_ratio"], label="Ms1")
     ax[2].plot(h["Ms2_ratio"], label="Ms2")
     ax[2].set(xlabel="iteration", ylabel="Ms / Ms0", title="Saturation magnetization")
     ax[2].legend()
@@ -53,7 +54,7 @@ def plot_pair(result: PairResult):
     b1 = np.linalg.norm(result.B1, axis=-1) * 1e3
     b2 = np.linalg.norm(result.B2, axis=-1) * 1e3
     db = np.linalg.norm(result.B1 - result.B2, axis=-1) * 1e3
-    mlim = np.abs([Mz1, Mz2]).max()
+    mlim = np.nanmax(np.abs([Mz1, Mz2]))
     bmin, bmax = min(b1.min(), b2.min()), max(b1.max(), b2.max())
 
     fig, ax = plt.subplots(2, 3, figsize=(16, 9.5))
@@ -75,6 +76,8 @@ def plot_pair(result: PairResult):
             _outline_sample(a, result)
         a.set(title=title, xlabel="y (nm)", ylabel="x (nm)")
         fig.colorbar(im, ax=a, label=clabel)
+    if result.target_field:
+        ax[0, 0].set_title("target field (no magnetization)")
     _quiver(ax[0, 2], result)
     win = ""
     if windowed:

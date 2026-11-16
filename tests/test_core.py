@@ -10,8 +10,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from adversarial_pairs import (Geometry, MonteCarloConfig, OptimizerSettings, PairResult, analysis,
-                               generate_pair, make_texture, parse_texture, run_monte_carlo, stray_field,
-                               topological_charge)
+                               fit_target_field, generate_pair, make_texture, parse_texture, run_monte_carlo,
+                               stray_field, topological_charge)
 from adversarial_pairs.physics import MU_0
 
 
@@ -234,6 +234,128 @@ def test_analysis_runs():
     assert len(vol) == len(rows)
     loc = analysis.kspace_localization(res)
     assert abs(loc["l2_real"] - loc["l2_kspace"]) < 1e-9 * max(1.0, loc["l2_real"])
+
+
+SMALL = Geometry(grid=(16, 16), sample_size_nm=(32, 32), height_nm=10)
+
+
+def test_settings_validation_and_aliases():
+    assert OptimizerSettings(ms_mode="independent").ms_mode == "free"
+    assert OptimizerSettings(freeze=[2]).freeze == (2,)
+    for bad in (dict(metric="l1"), dict(freeze=(1, 2)), dict(freeze=(3,)), dict(tol=0), dict(ms_mode="x")):
+        try:
+            OptimizerSettings(**bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+
+
+def test_abs_metric():
+    s = OptimizerSettings(n_iter=150, metric="abs")
+    res = generate_pair("skyrmion", "meron", SMALL, settings=s)
+    h = res.history
+    assert h["abs_dB"][-1] < 0.5 * h["abs_dB"][0]
+    assert min(res.Ms1, res.Ms2) == 1e6 and res.charge_constraint_met
+
+
+def test_early_stopping_and_history_csv():
+    import csv
+    s = OptimizerSettings(n_iter=2000, tol=0.05)
+    res = generate_pair("skyrmion", "meron", SMALL, settings=s)
+    assert res.stopped_early and res.n_iter_run < 2000
+    assert res.nrmse <= 0.05 and res.charge_constraint_met
+    with tempfile.TemporaryDirectory() as d:
+        res.save(d, history_every=10)
+        rows = list(csv.DictReader(open(Path(d) / "history.csv")))
+        back = PairResult.load(d)
+    n = len(res.history["loss"])
+    assert [int(r["iteration"]) for r in rows] == sorted(set(range(0, n, 10)) | {n - 1})
+    assert {"loss", "nrmse", "Q1", "Q2", "Ms1_A_per_m", "Ms2_A_per_m", "Ms2_over_Ms1"} <= set(rows[0])
+    assert back.stopped_early and back.n_iter_run == res.n_iter_run and back.settings.tol == 0.05
+
+
+def test_shared_ms():
+    res = generate_pair("skyrmion", "meron", SMALL, settings=OptimizerSettings(n_iter=100, ms_mode="shared"))
+    assert res.Ms1 == res.Ms2
+    # NRMSE is scale-invariant, so a shared Ms behaves exactly like a fixed one
+    fixed = generate_pair("skyrmion", "meron", SMALL, settings=OptimizerSettings(n_iter=100, ms_mode="fixed"))
+    assert abs(res.nrmse - fixed.nrmse) < 1e-9
+
+
+def test_freeze_texture_1():
+    m1 = make_texture("skyrmion", SMALL.grid)
+    s = OptimizerSettings(n_iter=150, freeze=(1,))
+    res = generate_pair(m1, "meron", SMALL, settings=s)
+    assert np.allclose(res.m1, m1.numpy(), atol=1e-12) and res.Ms1 == 1e6
+    assert res.nrmse < 0.5 * res.initial["nrmse"]
+    assert res.targets["Q1"] == res.initial["Q1"] and res.charge_constraint_met
+    try:
+        generate_pair("skyrmion", "meron", SMALL, settings=s, Q1_target=-1)
+        raise AssertionError("frozen texture's charge should not be targetable")
+    except ValueError:
+        pass
+
+
+def test_fit_target_field():
+    m = make_texture("skyrmion", SMALL.grid)
+    B = stray_field(m * SMALL.Ms, SMALL).numpy()           # tesla
+    s = OptimizerSettings(n_iter=300)
+    res = fit_target_field(B, "skyrmion", SMALL, perturbation=0.2, seed=1, settings=s)
+    assert res.target_field and np.isnan(res.Q1) and np.allclose(res.B1, B)
+    assert res.nrmse < 0.25 * res.initial["nrmse"] and abs(res.Q2 + 1) < 0.02
+    # Bz-only map, read from a file
+    with tempfile.TemporaryDirectory() as d:
+        np.save(Path(d) / "bz.npy", B[..., 2])
+        res_z = fit_target_field(str(Path(d) / "bz.npy"), "meron", SMALL, Q_target=-1,
+                                 settings=OptimizerSettings(n_iter=50))
+        assert res_z.B1.shape == SMALL.field_grid + (1,)
+        res_z.save(d)
+        back = PairResult.load(d)
+    assert back.target_field and np.isnan(back.Q1) and "Q1" in back.targets
+
+
+def test_radius_nm():
+    g = Geometry(grid=(32, 32), sample_size_nm=(64, 64))
+    a = make_texture("skyrmion", g.grid, sample_size_nm=g.sample_size_nm, radius_nm=8)
+    b = make_texture("skyrmion", g.grid, radius=0.25)
+    assert torch.equal(a, b)
+    assert parse_texture("meron:radius_nm=6")[1] == {"radius_nm": 6}
+    res = generate_pair("skyrmion:radius_nm=8", "meron:radius_nm=6", g, settings=OptimizerSettings(n_iter=5))
+    assert res.labels == ("skyrmion", "meron")
+
+
+def test_monte_carlo_records_and_saved_pairs():
+    import csv
+    cfg = MonteCarloConfig(n_samples=3, seed=5, save_pairs=True,
+                           texture_params={"skyrmion": {"radius_nm": 6}, "vortex": {"radius_nm": 5}})
+    mc = run_monte_carlo(SMALL, cfg, OptimizerSettings(n_iter=20), progress=False)
+    r = mc.records[0]
+    for k in ("seed", "sample_seed", "Ms2_over_Ms1", "Ms1_A_per_m", "Q1_target", "Q1", "nrmse",
+              "charge_constraint_met", "n_iter_run"):
+        assert k in r, k
+    assert r["seed"] == 5 and "_pair" not in r
+    with tempfile.TemporaryDirectory() as d:
+        mc.save(d)
+        files = sorted(p.name for p in (Path(d) / "pairs").iterdir())
+        rows = list(csv.DictReader(open(Path(d) / "samples.csv")))
+    assert files == ["sample_0000.npz", "sample_0001.npz", "sample_0002.npz"] and len(rows) == 3
+    for rec in mc.records:
+        if rec["texture1"] == "skyrmion":
+            assert '"radius_nm": 6' in rec["params1"]
+
+
+def test_cli_single_standoff_and_fit():
+    from adversarial_pairs.cli import main
+    with tempfile.TemporaryDirectory() as d:
+        main(["standoff", "--single", "--heights", "10,20", "--iters", "20", "--grid", "16", "--size", "32",
+              "--out", d])
+        rows = (Path(d) / "standoff_summary.csv").read_text().splitlines()
+        assert len(rows) == 3 and rows[0].startswith("height_nm,nrmse")
+        g = Geometry(grid=(16, 16), sample_size_nm=(32, 32))
+        np.save(Path(d) / "B.npy", stray_field(make_texture("meron", g.grid) * g.Ms, g).numpy())
+        main(["fit", "--target-field", str(Path(d) / "B.npy"), "--texture", "meron", "--iters", "20",
+              "--grid", "16", "--size", "32", "--tol", "0.5", "--out", str(Path(d) / "fit"), "--no-plots"])
+        assert (Path(d) / "fit" / "history.csv").exists()
 
 
 if __name__ == "__main__":
